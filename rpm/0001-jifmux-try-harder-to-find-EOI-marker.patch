@@ -1,0 +1,69 @@
+From e9770976f294a6ae34d8bd961087f65f157e0fbd Mon Sep 17 00:00:00 2001
+From: Mohammed Hassan <mohammed.hassan@jolla.com>
+Date: Thu, 5 May 2016 03:39:57 +0300
+Subject: [PATCH] jifmux: try harder to find EOI marker.
+
+If EOI marker is not within the last 5 bytes of the jpeg stream then we will fail to find it.
+Since the SOS marker has no size information the only viable way is to scan the image data
+until we find an EOI marker.
+---
+ gst/jpegformat/gstjifmux.c | 39 +++++++++++++++++++++++++++++++++------
+ 1 file changed, 33 insertions(+), 6 deletions(-)
+
+diff --git a/gst/jpegformat/gstjifmux.c b/gst/jpegformat/gstjifmux.c
+index 28638b7..541b954 100644
+--- a/gst/jpegformat/gstjifmux.c
++++ b/gst/jpegformat/gstjifmux.c
+@@ -328,16 +328,43 @@ gst_jif_mux_parse_image (GstJifMux * self, GstBuffer * buf)
+ 
+     if (marker == SOS) {
+       gint eoi_pos = -1;
+-      gint i;
++      guint8 sub_marker;
++      GstByteReader *sub_reader =
++          gst_byte_reader_new (gst_byte_reader_peek_data_unchecked (&reader),
++          gst_byte_reader_get_remaining (&reader));
++      /* The compressed image data follows. The only way to get its size it to scan it. */
++      while (TRUE) {
++        if (!gst_byte_reader_get_uint8 (sub_reader, &sub_marker)) {
++          break;
++        }
++
++        if (sub_marker != 0xFF) {
++          /* Not a marker. Ignored */
++          continue;
++        }
+ 
+-      /* search the last 5 bytes for the EOI marker */
+-      g_assert (map.size >= 5);
+-      for (i = 5; i >= 2; i--) {
+-        if (map.data[map.size - i] == 0xFF && map.data[map.size - i + 1] == EOI) {
+-          eoi_pos = map.size - i;
++        /* Now that we have a potential marker, let's check it: */
++        if (!gst_byte_reader_get_uint8 (sub_reader, &sub_marker)) {
+           break;
+         }
++        if (sub_marker == 0x00) {
++          /* 0xFF00 is an escaped 0xFF */
++          continue;
++        }
++
++        /* Anything other than 0xFF00 or 0xFFD0 to 0xFFD7 is a marker but we checked for
++         * 0xFF00 up there */
++        if (sub_marker < 0xD0 || sub_marker > 0xD7) {
++          /* OK, We are happy now. Deduct the 2 bytes for the marker from the size */
++          eoi_pos =
++              gst_byte_reader_get_pos (&reader) +
++              gst_byte_reader_get_pos (sub_reader) - 2;
++        }
+       }
++
++      gst_byte_reader_free (sub_reader);
++      sub_reader = NULL;
++      g_print ("eoi %d\n", eoi_pos);
+       if (eoi_pos == -1) {
+         GST_WARNING_OBJECT (self, "Couldn't find an EOI marker");
+         eoi_pos = map.size;
+-- 
+2.1.4
+
